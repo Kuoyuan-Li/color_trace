@@ -813,8 +813,22 @@ def color_trace_multi(inputs, outputs, colors, processcount, quantization='mc', 
 
     # create and start processes
     processes = []
+    local_variables = {
+        'quantization': quantization,
+        'dither': dither,
+        'remap': remap,
+        'stack': stack,
+        'prescale': prescale,
+        'despeckle': despeckle,
+        'smoothcorners': smoothcorners,
+        'optimizepaths': optimizepaths,
+        'colors': colors,
+        'tmp': tmp,
+        'background': background,
+        'palettesize': palettesize if remap is not None else None
+    }
     for i in range(processcount):
-        p = multiprocessing.Process(target=process_worker, args=(q1, q2, progress, total, layers, layers_lock, locals()))
+        p = multiprocessing.Process(target=process_worker, args=(q1, q2, progress, total, layers, layers_lock, local_variables))
         p.name = "color_trace worker #" + str(i)
         p.start()
         processes.append(p)
@@ -851,6 +865,8 @@ def color_trace_multi(inputs, outputs, colors, processcount, quantization='mc', 
         p.terminate()
     shutil.rmtree(tmp)
 
+    sys.stdout.write("\rcolor_trace_multi function end!\n")
+
 
 def remfiles(*filepaths):
     """remove file paths if they exist"""
@@ -868,6 +884,7 @@ def main(args=None):
     if args is None:
         args = get_args()
 
+    print(args)
     #set verbosity level
     if args.verbose:
         global VERBOSITY_LEVEL
