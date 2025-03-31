@@ -610,7 +610,6 @@ def q1_job(q2, total, layers, settings, findex, input, output):
             filter_ = 'lanczos'
         rescale(input, this_scaled, settings['prescale'], filter=filter_)
 
-
         if settings['colors'] is not None:
             quantize(this_scaled, this_reduced, settings['colors'], algorithm=settings['quantization'], dither=settings['dither'])
         elif settings['remap'] is not None:
@@ -618,6 +617,7 @@ def q1_job(q2, total, layers, settings, findex, input, output):
         else:
             #argparse should have caught this
             raise Exception("One of the arguments 'colors' or 'remap' must be specified")
+
         palette = make_palette(this_reduced)
 
         # update total based on the number of colors in palette
@@ -627,10 +627,8 @@ def q1_job(q2, total, layers, settings, findex, input, output):
             total.value -= settings['palettesize'] - len(palette)
         # initialize layers for the file at findex
         layers[findex] += [False] * len(palette)
-
         # get input image width
         width = get_width(input)
-
         # add jobs to the second job queue
         for i, color in enumerate(palette):
             q2.put({ 'width': width, 'color': color, 'palette': palette, 'reduced': this_reduced, 'output': output, 'findex': findex, 'cindex': i })
@@ -737,21 +735,21 @@ def process_worker(q1, q2, progress, total, layers, layers_lock, settings):
                 job_args = q2.get(block=False)
                 q2_job(layers, layers_lock, settings, **job_args)
                 q2.task_done()
-                progress.value += 1
+                with progress.get_lock():
+                    progress.value += 1
             except queue.Empty:
                 break
 
         # get a job from q1 since q2 is empty
         try:
             job_args = q1.get(block=False)
-
             q1_job(q2, total, layers, settings, **job_args)
             q1.task_done()
         except queue.Empty:
             time.sleep(.01)
         
-        if q2.empty() and q1.empty():
-            break
+        # if q2.empty() and q1.empty():
+        #     break
 
 def color_trace_multi(inputs, outputs, colors, processcount, quantization='mc', dither=None,
     remap=None, stack=False, prescale=2, despeckle=2, smoothcorners=1.0, optimizepaths=0.2, background=False):
@@ -779,13 +777,13 @@ def color_trace_multi(inputs, outputs, colors, processcount, quantization='mc', 
 """
     tmp = tempfile.mkdtemp()
 
-    # create a two job queues
+    # create a two job queues (Two JoinableQueues for inter-process communication)
     # q1 = scaling + color reduction
     q1 = multiprocessing.JoinableQueue()
     # q2 = isolation + tracing
     q2 = multiprocessing.JoinableQueue()
 
-    # create a manager to share the layers between processes
+    # create a manager to share the layers (data structures, variables below) between processes
     manager = multiprocessing.Manager()
     layers = []
     for i in range(min(len(inputs), len(outputs))):
@@ -796,6 +794,8 @@ def color_trace_multi(inputs, outputs, colors, processcount, quantization='mc', 
     # create a shared memory counter of completed and total tasks for measuring progress
     progress = multiprocessing.Value('i', 0)
     if colors is not None:
+        # If colors is provided, assume each input file will generate colors number of tracing jobs.
+        # total represents the total expected work (number of q2 jobs).
         # this is only an estimate because quantization can result in less colors
         # than in the "colors" variable. This value is corrected by q1 tasks to converge
         # on the real total.
@@ -810,6 +810,8 @@ def color_trace_multi(inputs, outputs, colors, processcount, quantization='mc', 
     else:
         #argparse should have caught this
         raise Exception("One of the arguments 'colors' or 'remap' must be specified")
+
+    verbose("Total number of estimated tasks: {0}".format(total.value))
 
     # create and start processes
     processes = []
@@ -827,6 +829,9 @@ def color_trace_multi(inputs, outputs, colors, processcount, quantization='mc', 
         'background': background,
         'palettesize': palettesize if remap is not None else None
     }
+
+    # start <processcount> processes, where each process will run process_worker
+    # process_worker will check if there are any jobs in q1 or q2, and will process them
     for i in range(processcount):
         p = multiprocessing.Process(target=process_worker, args=(q1, q2, progress, total, layers, layers_lock, local_variables))
         p.name = "color_trace worker #" + str(i)
@@ -836,11 +841,10 @@ def color_trace_multi(inputs, outputs, colors, processcount, quantization='mc', 
     try:
         # so for each input and (dir-appended) output...
         for index, (i, o) in enumerate(zip(inputs, outputs)):
-            verbose(i, ' -> ', o)
+            verbose(i, ' -> ', o, ' (', index+1, '/', len(inputs), ')')
 
             # add a job to the first job queue
             q1.put({ 'input': i, 'output': o, 'findex': index })
-
 
         # show progress until all jobs have been completed
         while progress.value < total.value:
@@ -859,7 +863,6 @@ def color_trace_multi(inputs, outputs, colors, processcount, quantization='mc', 
             p.terminate()
         shutil.rmtree(tmp)
         raise e
-
     # close all processes
     for p in processes:
         p.terminate()
@@ -884,13 +887,13 @@ def main(args=None):
     if args is None:
         args = get_args()
 
-    print(args)
     #set verbosity level
     if args.verbose:
         global VERBOSITY_LEVEL
         VERBOSITY_LEVEL = 1
 
     # set output filename pattern depending on --output argument
+    # output_pattern is args.directory + args.output or "{0}.svg"
     if args.output is None:
         output_pattern = "{0}.svg"
     elif '*' in args.output:
@@ -913,18 +916,24 @@ def main(args=None):
     else:
         processcount = args.cores
 
+    verbose(f"Number of cores to use: {processcount}")
+
     # collect only those arguments needed for color_trace_multi
     inputs_outputs = zip(*get_inputs_outputs(args.input, output_pattern))
+
     try:
         inputs, outputs = inputs_outputs
     except ValueError: #nothing to unpack
         inputs, outputs = [], []
+
     if args.floydsteinberg:
         dither = 'floydsteinberg'
     elif args.riemersma:
         dither = 'riemersma'
     else:
         dither = None
+
+
     colors = args.colors
     color_trace_kwargs = vars(args)
     for k in ('colors', 'directory', 'input', 'output', 'cores', 'floydsteinberg', 'riemersma', 'verbose'):
